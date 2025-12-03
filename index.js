@@ -1,53 +1,36 @@
-const express = require("express");
-const axios = require("axios");
-
-// 從環境變數讀取 LINE 的 Channel access token
-const CHANNEL_ACCESS_TOKEN = process.env.CHANNEL_ACCESS_TOKEN;
+import express from "express";
+import bodyParser from "body-parser";
+import fetch from "node-fetch";
 
 const app = express();
-app.use(express.json());
+app.use(bodyParser.json());
 
-// LINE Webhook 入口
-app.post("/webhook", async (req, res) => {
-  // 一定要先回 200，LINE Verify 才會成功
-  res.status(200).send("OK");
+// 從環境變數讀取設定
+const CHANNEL_ACCESS_TOKEN = process.env.CHANNEL_ACCESS_TOKEN;
+const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
+const PORT = process.env.PORT || 3000;
 
-  const events = req.body.events;
-  if (!events || events.length === 0) return;
+// ---- 測試用 ----
+app.get("/", (req, res) => {
+  res.send("OK from Render");
+});
 
-  for (const e of events) {
-    if (e.type === "message" && e.message.type === "text") {
-      // 簡單做：回 echo 訊息
-      const userText = e.message.text;
-      const replyText = "你說的是：" + userText;
-      await replyMessage(e.replyToken, replyText);
-    }
+// ---- Webhook ----
+app.post("/", (req, res) => {
+  try {
+    const body = req.body;
+    console.log("Webhook received:", JSON.stringify(body));
+
+    // LINE 驗證 webhook 時會送空 body，所以直接回 200
+    res.status(200).send("OK");
+
+  } catch (err) {
+    console.error(err);
+    res.status(200).send("OK");
   }
 });
 
-// 呼叫 LINE Reply API
-async function replyMessage(replyToken, text) {
-  const url = "https://api.line.me/v2/bot/message/reply";
-  const payload = {
-    replyToken,
-    messages: [
-      {
-        type: "text",
-        text
-      }
-    ]
-  };
-
-  await axios.post(url, payload, {
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: "Bearer " + CHANNEL_ACCESS_TOKEN
-    }
-  });
-}
-
-// 啟動伺服器（Render 會設定 PORT 環境變數）
-const PORT = process.env.PORT || 3000;
+// ---- 啟動 ----
 app.listen(PORT, () => {
-  console.log("Bot server running on port", PORT);
+  console.log(`Server running on port ${PORT}`);
 });
