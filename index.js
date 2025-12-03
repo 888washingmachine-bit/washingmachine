@@ -1,36 +1,56 @@
-import express from "express";
-import bodyParser from "body-parser";
-import fetch from "node-fetch";
+const express = require("express");
+const axios = require("axios");
+
+// 從環境變數讀取 LINE 的 Channel access token
+const CHANNEL_ACCESS_TOKEN = process.env.CHANNEL_ACCESS_TOKEN;
 
 const app = express();
-app.use(bodyParser.json());
+app.use(express.json());
 
-// 從環境變數讀取設定
-const CHANNEL_ACCESS_TOKEN = process.env.CHANNEL_ACCESS_TOKEN;
-const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
-const PORT = process.env.PORT || 3000;
+// LINE Webhook 入口
+app.post("/webhook", async (req, res) => {
+  // 一定要先回 200，LINE Verify 才會成功
+  res.status(200).send("OK");
 
-// ---- 測試用 ----
-app.get("/", (req, res) => {
-  res.send("OK from Render");
-});
+  const events = req.body.events;
+  if (!events || events.length === 0) return;
 
-// ---- Webhook ----
-app.post("/", (req, res) => {
-  try {
-    const body = req.body;
-    console.log("Webhook received:", JSON.stringify(body));
-
-    // LINE 驗證 webhook 時會送空 body，所以直接回 200
-    res.status(200).send("OK");
-
-  } catch (err) {
-    console.error(err);
-    res.status(200).send("OK");
+  for (const e of events) {
+    if (e.type === "message" && e.message.type === "text") {
+      const userText = e.message.text;
+      const replyText = "你說的是：" + userText;
+      await replyMessage(e.replyToken, replyText);
+    }
   }
 });
 
-// ---- 啟動 ----
+// 呼叫 LINE Reply API
+async function replyMessage(replyToken, text) {
+  const url = "https://api.line.me/v2/bot/message/reply";
+  const payload = {
+    replyToken,
+    messages: [
+      {
+        type: "text",
+        text
+      }
+    ]
+  };
+
+  try {
+    await axios.post(url, payload, {
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer " + CHANNEL_ACCESS_TOKEN
+      }
+    });
+  } catch (err) {
+    console.error("reply error:", err.response?.data || err.message);
+  }
+}
+
+// 啟動伺服器
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log("Bot server running on port", PORT);
 });
