@@ -2,16 +2,14 @@ const express = require("express");
 const axios = require("axios");
 
 const CHANNEL_ACCESS_TOKEN = process.env.CHANNEL_ACCESS_TOKEN;
+const SHEET_WEBAPP_URL = process.env.SHEET_WEBAPP_URL;
 
 const app = express();
 app.use(express.json());
 
-// 用記憶體暫存機台狀態（之後可以改成 Google Sheet）
-const machines = {}; 
-// 例如：machines["A1"] = { status: "finished_wait", userId: "Uxxxx" };
-
+// LINE Webhook 入口
 app.post("/webhook", async (req, res) => {
-  // 先回 200 給 LINE
+  // 一定要先回 200，LINE Verify 才會成功
   res.status(200).send("OK");
 
   const events = req.body.events;
@@ -19,7 +17,11 @@ app.post("/webhook", async (req, res) => {
 
   for (const e of events) {
     if (e.type === "message" && e.message.type === "text") {
-      await handleTextMessage(e);
+      try {
+        await handleTextMessage(e);
+      } catch (err) {
+        console.error("handleTextMessage error:", err);
+      }
     }
   }
 });
@@ -36,49 +38,60 @@ async function handleTextMessage(event) {
     if (!machineId) {
       return replyMessage(replyToken, "請輸入機台編號，例如：使用A1");
     }
-    machines[machineId] = { status: "waiting_start", userId };
+
+    // 呼叫 Apps Script，請它寫入「waiting_start」
+    try {
+      await axios.post(SHEET_WEBAPP_URL, {
+        action: "use",
+        userId,
+        machineId
+      });
+    } catch (err) {
+      console.error("sheet use error:", err.response?.data || err.message);
+      return replyMessage(replyToken, "寫入試算表失敗，請稍後再試。");
+    }
+
     return replyMessage(
       replyToken,
-      `✅ 已登記你本次使用洗衣機 ${machineId}，開始運轉時會標記是你。`
+      `✅ 已登記你本次使用洗衣機 ${machineId}，資料已寫入試算表。`
     );
   }
 
   // 指令：取衣A1 / 取衣 A1
   if (text.startsWith("取衣")) {
     const machineId = text.replace("取衣", "").trim();
-    const m = machines[machineId];
-    if (!m) {
-      return replyMessage(
-        replyToken,
-        `❌ 找不到洗衣機 ${machineId} 的紀錄。請先使用「使用${machineId}」登記。`
-      );
+    if (!machineId) {
+      return replyMessage(replyToken, "請輸入機台編號，例如：取衣A1");
     }
 
-    // 這裡暫時不檢查 finished_wait，只檢查是不是同一個 user
-    if (m.userId !== userId) {
-      return replyMessage(
-        replyToken,
-        `❌ 目前登記的使用者不是你，無法釋放洗衣機 ${machineId}。`
-      );
+    // 呼叫 Apps Script，請它檢查 userId 並釋放
+    try {
+      await axios.post(SHEET_WEBAPP_URL, {
+        action: "pickup",
+        userId,
+        machineId
+      });
+    } catch (err) {
+      console.error("sheet pickup error:", err.response?.data || err.message);
+      return replyMessage(replyToken, "更新試算表失敗，請稍後再試。");
     }
 
-    machines[machineId] = { status: "idle", userId: null };
     return replyMessage(
       replyToken,
-      `✅ 已確認你已取走 ${machineId} 的衣物，機台已釋放。`
+      `✅ 已送出取衣確認，若紀錄是你，洗衣機 ${machineId} 將被釋放。`
     );
   }
 
-  // 其他訊息：顯示說明
+  // 其他文字：顯示說明
   const help =
-    "👋 歡迎使用智慧洗衣通知系統（Node.js 版）\n" +
+    "👋 智慧洗衣機系統（Apps Script + Sheet）\n" +
     "指令示例：\n" +
-    "「使用A1」→ 登記你正在使用 A1\n" +
-    "「取衣A1」→ 取衣後釋放 A1\n";
+    "「使用A1」→ 登記你正在使用 A1（寫入 machines 工作表）\n" +
+    "「取衣A1」→ 取衣後釋放 A1（若紀錄使用者是你）\n";
   return replyMessage(replyToken, help);
 }
 
-// 回覆 LINE
+// 呼叫 LINE Reply API
 async function replyMessage(replyToken, text) {
   const url = "https://api.line.me/v2/bot/message/reply";
   const payload = {
@@ -98,6 +111,7 @@ async function replyMessage(replyToken, text) {
   }
 }
 
+// 啟動伺服器
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("Bot server running on port", PORT);
