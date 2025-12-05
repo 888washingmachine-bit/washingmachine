@@ -1,11 +1,14 @@
 const express = require("express");
 const axios = require("axios");
 
-// 從環境變數讀設定
+// ======== 環境變數設定 ========
+// LINE
 const CHANNEL_ACCESS_TOKEN = process.env.CHANNEL_ACCESS_TOKEN;
 
+// Supabase
 const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_KEY; // 用 SERVICE_KEY
+// 你在 Render 裡的環境變數名稱：SUPABASE_SERVICE_KEY（放 service_role key）
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const SUPABASE_REST_URL = `${SUPABASE_URL}/rest/v1`;
 
 const app = express();
@@ -13,7 +16,7 @@ app.use(express.json());
 
 // ========= LINE Webhook 入口 =========
 app.post("/webhook", async (req, res) => {
-  // 一定要先回 200，LINE 才不會當成失敗
+  // 先回 200，避免 LINE 覺得超時
   res.status(200).send("OK");
 
   const events = req.body.events;
@@ -35,6 +38,8 @@ async function handleTextMessage(event) {
   const userId = event.source.userId;
   const replyToken = event.replyToken;
   const text = event.message.text.trim();
+
+  console.log(">>> Receive text from LINE:", text);
 
   // 指令：使用A1 / 使用 A1
   if (text.startsWith("使用")) {
@@ -108,14 +113,23 @@ async function handleTextMessage(event) {
 
 // 新增 / 更新一筆機台紀錄（同一個 machine_id 只會存在一列）
 async function upsertMachine(row) {
-  await axios.post(`${SUPABASE_REST_URL}/machines`, row, {
-    headers: {
-      apikey: SUPABASE_SERVICE_ROLE_KEY,
-      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-      "Content-Type": "application/json",
-      Prefer: "resolution=merge-duplicates" // machine_id 是 primary key
+  const now = new Date().toISOString(); // UTC 時間
+
+  await axios.post(
+    `${SUPABASE_REST_URL}/machines`,
+    {
+      ...row,
+      updated_at: now // 不管是 insert 或 update 都寫最新時間
+    },
+    {
+      headers: {
+        apikey: SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+        "Content-Type": "application/json",
+        Prefer: "resolution=merge-duplicates" // machine_id 是 primary key
+      }
     }
-  });
+  );
 }
 
 // 取某一台機器的紀錄
@@ -138,11 +152,14 @@ async function getMachine(machineId) {
 
 // 將某機器狀態改成 idle
 async function updateMachineToIdle(machineId) {
+  const now = new Date().toISOString(); // UTC 時間
+
   await axios.patch(
     `${SUPABASE_REST_URL}/machines`,
     {
       status: "idle",
-      current_user: null
+      current_user: null,
+      updated_at: now // 取衣成功也更新時間
     },
     {
       headers: {
