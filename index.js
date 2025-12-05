@@ -5,7 +5,7 @@ const axios = require("axios");
 const CHANNEL_ACCESS_TOKEN = process.env.CHANNEL_ACCESS_TOKEN;
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_KEY; // 用 SERVICE_KEY
 const SUPABASE_REST_URL = `${SUPABASE_URL}/rest/v1`;
 
 const app = express();
