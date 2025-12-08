@@ -2,168 +2,176 @@
 const express = require("express");
 const axios = require("axios");
 
-// ======== 環境變數 ========
+// ========= 環境變數 =========
 const CHANNEL_ACCESS_TOKEN = process.env.CHANNEL_ACCESS_TOKEN;
 
 // Supabase
 const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_KEY; // 你在 Render 的名字
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const SUPABASE_REST_URL = `${SUPABASE_URL}/rest/v1`;
 
 const app = express();
-app.use(express.json()); // 這行很重要，才能讀到 ESP32 / LINE 傳來的 JSON
+app.use(express.json());
 
-// ================== LINE Webhook 入口 ==================
+// ================== LINE Webhook ==================
 app.post("/webhook", async (req, res) => {
-  // 先回 200 給 LINE，避免超時
-  res.status(200).send("OK");
+  // 先回 200 給 LINE（避免 timeout）
+  res.status(200).end();
 
-  const events = req.body.events;
-  if (!events || events.length === 0) return;
-
-  for (const e of events) {
-    if (e.type === "message" && e.message.type === "text") {
+  const events = req.body.events || [];
+  for (const ev of events) {
+    if (ev.type === "message" && ev.message.type === "text") {
+      console.log(">>> LINE text:", ev.message.text);
       try {
-        await handleTextMessage(e);
+        await handleTextMessage(ev);
       } catch (err) {
-        console.error("handleTextMessage error:", err.response?.data || err);
+        console.error("handleTextMessage error:", err.response?.data || err.message);
       }
     }
   }
 });
 
-// 處理文字訊息（使用A1 / 取衣A1）
+// 處理使用者文字指令
 async function handleTextMessage(event) {
   const userId = event.source.userId;
   const replyToken = event.replyToken;
   const text = event.message.text.trim();
 
-  console.log(">>> LINE text:", text);
-
-  // 使用 A1
+  // 指令：使用A1 / 使用 A1
   if (text.startsWith("使用")) {
     const machineId = text.replace("使用", "").trim();
     if (!machineId) {
       return replyMessage(replyToken, "請輸入機台編號，例如：使用A1");
     }
 
-    try {
-      await upsertMachine({
-        machine_id: machineId,
-        status: "waiting_start", // 等待開始運轉
-        current_user: userId
-      });
-    } catch (err) {
-      console.error("db use error:", err.response?.data || err);
-      return replyMessage(replyToken, "寫入資料庫失敗，請稍後再試。");
-    }
+    // 登記使用者
+    await upsertMachine({
+      machine_id: machineId,
+      status: "waiting_start",
+      current_user: userId
+    });
 
     return replyMessage(
       replyToken,
-      `✅ 已登記你本次使用洗衣機 ${machineId}。開始運轉後會自動通知你。`
+      `✅ 已登記你本次使用洗衣機 ${machineId}。\n偵測到開始運轉時會自動標記是你。`
     );
   }
 
-  // 取衣 A1
+  // 指令：取衣A1 / 取衣 A1
   if (text.startsWith("取衣")) {
     const machineId = text.replace("取衣", "").trim();
     if (!machineId) {
       return replyMessage(replyToken, "請輸入機台編號，例如：取衣A1");
     }
 
-    try {
-      const row = await getMachine(machineId);
-      if (!row) {
-        return replyMessage(
-          replyToken,
-          `找不到洗衣機 ${machineId} 的紀錄，請先輸入「使用${machineId}」。`
-        );
-      }
+    const row = await getMachine(machineId);
+    if (!row) {
+      return replyMessage(replyToken, `找不到洗衣機 ${machineId} 的紀錄，請先輸入「使用${machineId}」。`);
+    }
 
-      if (row.current_user !== userId) {
-        return replyMessage(
-          replyToken,
-          `❌ 登記這台洗衣機的不是你，無法釋放 ${machineId}。`
-        );
-      }
-
-      await updateMachineToIdle(machineId);
-
+    if (row.current_user !== userId) {
       return replyMessage(
         replyToken,
-        `✅ 已確認你已取走 ${machineId} 的衣物，機台已釋放。`
+        `❌ 登記這台洗衣機的人不是你，無法釋放 ${machineId}。`
       );
-    } catch (err) {
-      console.error("db pickup error:", err.response?.data || err);
-      return replyMessage(replyToken, "更新資料庫失敗，請稍後再試。");
     }
+
+    if (row.status !== "finished_wait") {
+      return replyMessage(
+        replyToken,
+        `目前系統狀態不是「洗衣完成待取」，現在狀態是：${row.status}`
+      );
+    }
+
+    // 改成 idle
+    await updateMachineToIdle(machineId);
+
+    await replyMessage(
+      replyToken,
+      `✅ 已確認你已取走 ${machineId} 的衣物，機台已釋放。`
+    );
+
+    await broadcastToAll(`洗衣機 ${machineId}：已空閒 ✅ 可以使用`);
+    return;
   }
 
-  // 其他文字 → 顯示說明
+  // 其他文字：顯示說明
   const help =
-    "👋 智慧洗衣機系統（Supabase 版）\n" +
+    "👋 智慧洗衣機系統\n" +
     "指令示例：\n" +
     "「使用A1」→ 登記你正在使用 A1\n" +
     "「取衣A1」→ 取衣後釋放 A1\n";
   return replyMessage(replyToken, help);
 }
 
-// ================== ESP32 入口 ==================
-// ESP32 會 POST 到： https://你的 render 網址 /esp32
-// Body: { "machine_id": "A1", "status": "started" | "finished" }
+// ================== ESP32 上報入口 ==================
 app.post("/esp32", async (req, res) => {
-  console.log(">>> ESP32 payload:", req.body);
+  res.status(200).json({ ok: true });
 
   const { machine_id, status } = req.body || {};
+  console.log(">>> ESP32 payload:", req.body);
+
   if (!machine_id || !status) {
-    return res.status(400).json({ ok: false, error: "missing machine_id or status" });
+    console.log("ESP32 payload 缺少欄位");
+    return;
   }
 
   try {
-    const row = await getMachine(machine_id); // 先看目前資料庫狀態（拿 current_user）
+    const machine = await getMachine(machine_id);
+
+    if (!machine) {
+      // 若還沒有資料就先建一筆（沒有 current_user）
+      await upsertMachine({
+        machine_id,
+        status,
+        current_user: null
+      });
+      return;
+    }
 
     if (status === "started") {
-      // ESP32 偵測到開始運轉 → 狀態改成 running
+      // 洗衣開始
       await upsertMachine({
         machine_id,
         status: "running",
-        current_user: row ? row.current_user : null
+        current_user: machine.current_user
       });
-
-      // 如果有綁定使用者，就私訊
-      if (row && row.current_user) {
-        await pushMessage(row.current_user, `🌀 你登記的洗衣機 ${machine_id} 已開始運轉。`);
-      }
 
       console.log(`machine ${machine_id} -> running`);
-    } else if (status === "finished") {
-      // ESP32 偵測到洗完 → 狀態改成 finished_wait
-      await upsertMachine({
-        machine_id,
-        status: "finished_wait",
-        current_user: row ? row.current_user : null
-      });
 
-      if (row && row.current_user) {
-        await pushMessage(
-          row.current_user,
-          `✅ 洗衣機 ${machine_id} 已完成，請盡速取衣。\n取衣後輸入「取衣${machine_id}」釋放機台。`
+      if (machine.current_user) {
+        await pushToUser(
+          machine.current_user,
+          `🌀 你登記的洗衣機 ${machine_id} 已開始運轉。`
         );
       }
 
-      console.log(`machine ${machine_id} -> finished_wait`);
-    } else {
-      console.log("unknown status from ESP32:", status);
-    }
+      await broadcastToAll(`洗衣機 ${machine_id}：使用中（有人使用）`);
+    } else if (status === "finished") {
+      // 洗衣完成，等待取衣
+      await upsertMachine({
+        machine_id,
+        status: "finished_wait",
+        current_user: machine.current_user
+      });
 
-    return res.json({ ok: true });
+      console.log(`machine ${machine_id} -> finished_wait`);
+
+      if (machine.current_user) {
+        await pushToUser(
+          machine.current_user,
+          `✅ 洗衣機 ${machine_id} 已完成，請盡速取衣。`
+        );
+      }
+
+      await broadcastToAll(`洗衣機 ${machine_id}：洗衣完成，等待取衣中（請勿占用）`);
+    }
   } catch (err) {
-    console.error("esp32 route error:", err.response?.data || err);
-    return res.status(500).json({ ok: false, error: "server error" });
+    console.error("handle ESP32 error:", err.response?.data || err.message);
   }
 });
 
-// ================== Supabase：共用函式 ==================
+// ================== Supabase 操作 ==================
 async function upsertMachine(row) {
   const now = new Date().toISOString();
 
@@ -172,10 +180,10 @@ async function upsertMachine(row) {
     { ...row, updated_at: now },
     {
       headers: {
-        apikey: SUPABASE_SERVICE_ROLE_KEY,
-        Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
         "Content-Type": "application/json",
-        Prefer: "resolution=merge-duplicates" // machine_id 為 PK
+        Prefer: "resolution=merge-duplicates"
       }
     }
   );
@@ -184,8 +192,8 @@ async function upsertMachine(row) {
 async function getMachine(machineId) {
   const resp = await axios.get(`${SUPABASE_REST_URL}/machines`, {
     headers: {
-      apikey: SUPABASE_SERVICE_ROLE_KEY,
-      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`
+      apikey: SUPABASE_SERVICE_KEY,
+      Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`
     },
     params: {
       machine_id: `eq.${machineId}`,
@@ -210,11 +218,13 @@ async function updateMachineToIdle(machineId) {
     },
     {
       headers: {
-        apikey: SUPABASE_SERVICE_ROLE_KEY,
-        Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
         "Content-Type": "application/json"
       },
-      params: { machine_id: `eq.${machineId}` }
+      params: {
+        machine_id: `eq.${machineId}`
+      }
     }
   );
 }
@@ -235,12 +245,11 @@ async function replyMessage(replyToken, text) {
       }
     });
   } catch (err) {
-    console.error("reply error:", err.response?.data || err);
+    console.error("reply error:", err.response?.data || err.message);
   }
 }
 
-// push 給特定使用者（洗衣完成通知用）
-async function pushMessage(to, text) {
+async function pushToUser(to, text) {
   const url = "https://api.line.me/v2/bot/message/push";
   const payload = {
     to,
@@ -255,12 +264,31 @@ async function pushMessage(to, text) {
       }
     });
   } catch (err) {
-    console.error("push error:", err.response?.data || err);
+    console.error("push error:", err.response?.data || err.message);
+  }
+}
+
+// 使用 LINE 官方的 broadcast API，會發給所有加好友的人
+async function broadcastToAll(text) {
+  const url = "https://api.line.me/v2/bot/message/broadcast";
+  const payload = {
+    messages: [{ type: "text", text }]
+  };
+
+  try {
+    await axios.post(url, payload, {
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer " + CHANNEL_ACCESS_TOKEN
+      }
+    });
+  } catch (err) {
+    console.error("broadcast error:", err.response?.data || err.message);
   }
 }
 
 // ================== 啟動伺服器 ==================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log("Server running on port", PORT);
+  console.log("Bot server running on port", PORT);
 });
